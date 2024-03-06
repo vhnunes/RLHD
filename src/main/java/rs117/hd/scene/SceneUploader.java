@@ -26,6 +26,7 @@
 package rs117.hd.scene;
 
 import com.google.common.base.Stopwatch;
+import java.io.IOException;
 import javax.annotation.Nonnull;
 import javax.inject.Inject;
 import javax.inject.Singleton;
@@ -38,6 +39,7 @@ import rs117.hd.data.materials.GroundMaterial;
 import rs117.hd.data.materials.Material;
 import rs117.hd.data.materials.UvType;
 import rs117.hd.model.ModelPusher;
+import rs117.hd.regions.Regions;
 import rs117.hd.scene.model_overrides.ModelOverride;
 import rs117.hd.scene.model_overrides.ObjectType;
 import rs117.hd.scene.tile_overrides.TileOverride;
@@ -80,8 +82,31 @@ class SceneUploader {
 	@Inject
 	private ModelPusher modelPusher;
 
+	private Regions regions;	// TODO: Use regions from GPU Plugin?
+
+	@Inject
+	SceneUploader(
+		Client client //,
+		//GpuPluginConfig config
+	)
+	{
+		this.client = client;
+		//this.gpuConfig = config;
+
+		try (var in = SceneUploader.class.getResourceAsStream("regions/regions.txt"))		// TODO: Get regions txt file from GPU plugin
+		{
+			regions = new Regions(in, "regions.txt");
+		}
+		catch (IOException ex)
+		{
+			throw new RuntimeException(ex);
+		}
+	}
+
 	public void upload(SceneContext sceneContext) {
 		Stopwatch stopwatch = Stopwatch.createStarted();
+
+		prepare(sceneContext.scene);
 
 		for (int z = 0; z < Constants.MAX_Z; ++z) {
 			for (int x = 0; x < Constants.EXTENDED_SCENE_SIZE; ++x) {
@@ -106,6 +131,41 @@ class SceneUploader {
 				) / 1e6
 			)
 		);
+	}
+
+	// remove tiles from the scene that are outside the current region
+	private void prepare(Scene scene)
+	{
+//		if (scene.isInstance() || !gpuConfig.hideUnrelatedMaps())	// TODO: Add hideUnrelatedMaps config
+//		{
+//			return;
+//		}
+
+		if (scene.isInstance())
+		{
+			return;
+		}
+
+		int baseX = scene.getBaseX() / 8;
+		int baseY = scene.getBaseY() / 8;
+		int centerX = baseX + 6;
+		int centerY = baseY + 6;
+		int centerId = regions.getRegionId(centerX, centerY);
+
+		int r = Constants.EXTENDED_SCENE_SIZE / 16;
+		for (int offx = -r; offx <= r; ++offx)
+		{
+			for (int offy = -r; offy <= r; ++offy)
+			{
+				int cx = centerX + offx;
+				int cy = centerY + offy;
+				int id = regions.getRegionId(cx, cy);
+				if (id != centerId)
+				{
+					removeChunk(scene, cx, cy);
+				}
+			}
+		}
 	}
 
 	public void fillGaps(SceneContext sceneContext) {
@@ -1136,5 +1196,35 @@ class SceneUploader {
 		int terrainData = waterDepth << 8 | waterType.ordinal() << 3 | plane << 1 | (isTerrain ? 1 : 0);
 		assert (terrainData & ~0xFFFFFF) == 0 : "Only the lower 24 bits are usable, since we pass this into shaders as a float";
 		return terrainData;
+	}
+
+	private static void removeChunk(Scene scene, int cx, int cy)
+	{
+		int wx = cx * 8;
+		int wy = cy * 8;
+		int sx = wx - scene.getBaseX();
+		int sy = wy - scene.getBaseY();
+		int cmsx = sx + SceneUploader.SCENE_OFFSET;
+		int cmsy = sy + SceneUploader.SCENE_OFFSET;
+		Tile[][][] tiles = scene.getExtendedTiles();
+		for (int x = 0; x < 8; ++x)
+		{
+			for (int y = 0; y < 8; ++y)
+			{
+				int msx = cmsx + x;
+				int msy = cmsy + y;
+				if (msx >= 0 && msx < Constants.EXTENDED_SCENE_SIZE && msy >= 0 && msy < Constants.EXTENDED_SCENE_SIZE)
+				{
+					for (int z = 0; z < Constants.MAX_Z; ++z)
+					{
+						Tile tile = tiles[z][msx][msy];
+						if (tile != null)
+						{
+							scene.removeTile(tile);
+						}
+					}
+				}
+			}
+		}
 	}
 }
